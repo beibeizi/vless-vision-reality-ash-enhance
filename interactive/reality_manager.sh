@@ -17,6 +17,7 @@ run_manager() {
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
+import ipaddress
 import shutil
 import fcntl
 import json
@@ -59,6 +60,7 @@ GREATFIRE_CURL_ERRORS = {
     60: "TLS 证书校验失败",
     63: "响应超过大小限制",
 }
+PUBLIC_IPV4_SERVICES = ("https://api.ipify.org", "https://ipv4.icanhazip.com")
 os.environ["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin:/usr/local/bin"
 os.umask(0o077)
 
@@ -124,6 +126,32 @@ def port_query(default="8443"):
 
 def busy(p):
     return bool(cmd("ss", "-H", "-ltn", f"sport = :{p}").stdout.strip())
+
+
+def public_ipv4(value):
+    try:
+        address = ipaddress.IPv4Address(value)
+    except ipaddress.AddressValueError:
+        return ""
+    return str(address) if address.is_global and not address.is_multicast else ""
+
+
+def detect_public_ipv4():
+    if not shutil.which("curl"):
+        return ""
+    for url in PUBLIC_IPV4_SERVICES:
+        try:
+            response = cmd(
+                "curl", "--disable", "--ipv4", "--fail", "--silent",
+                "--max-time", "4", "--max-filesize", "1024", url, check=False,
+            )
+        except (OSError, ValueError, subprocess.SubprocessError):
+            continue
+        if response.returncode == 0:
+            address = public_ipv4(response.stdout.strip())
+            if address:
+                return address
+    return ""
 
 
 def greatfire_status(domain):
@@ -225,12 +253,13 @@ def automatic_domain(scanner):
             raise RuntimeError("未找到合格的 TLS 域名，可重新筛选或手动填写")
         if scan.returncode:
             raise RuntimeError("自动筛选未完成，请检查服务器的公网与 DNS 连通性")
-        ranked = json.loads(result.read_text(encoding="utf-8"))["all_valid"]
+        scan_data = json.loads(result.read_text(encoding="utf-8"))
 
-    domains = [item["domain"] for item in ranked if HOST_RE.fullmatch(item["domain"])]
+    domains = [item["domain"] for item in scan_data["all_valid"] if HOST_RE.fullmatch(item["domain"])]
     if not domains:
         raise RuntimeError("自动筛选未返回格式有效的 TLS 域名")
-    return choose_greatfire_domain(domains[:GREATFIRE_CANDIDATES])
+    domain = choose_greatfire_domain(domains[:GREATFIRE_CANDIDATES])
+    return domain, public_ipv4(scan_data.get("my_ip"))
 
 
 def domain_query(scanner):
@@ -242,7 +271,7 @@ def domain_query(scanner):
     domain = choice("你控制或已获授权使用的 TLS 域名（不含协议、端口）").lower()
     if not HOST_RE.fullmatch(domain):
         raise ValueError("请输入域名，例如 tls.example.org；国际域名请用 Punycode")
-    return domain
+    return domain, ""
 
 
 def binary(raw):
@@ -360,7 +389,7 @@ def provision(stage, scanner):
     p = port_query()
     if busy(p):
         raise RuntimeError(f"TCP {p} 已被占用")
-    target = domain_query(scanner)
+    target, entry_address = domain_query(scanner)
     print(f"将创建专用服务 {NAME}，监听 0.0.0.0:{p}，TLS 目标 {target}:443。")
     if choice("输入 INSTALL 确认") != "INSTALL":
         print("已取消"); return
@@ -409,7 +438,12 @@ def provision(stage, scanner):
         else:
             print("自动清理未完成；保留配置，请先检查该专用服务。", file=sys.stderr)
         raise
-    print("已启用专用实例。用菜单第 5 项显示客户端配置。")
+    print("已启用专用实例。")
+    entry_address = entry_address or detect_public_ipv4()
+    if entry_address:
+        show_client(inbound(cfg), public, entry_address, p)
+    else:
+        print("未检测到公网 IPv4。可在菜单第 5 项填写客户端入口以生成连接链接。")
 
 
 def inbound(data):
@@ -491,22 +525,65 @@ def uninstall():
     print("专用实例已卸载。")
 
 
+def show_client(entry, public, target, port):
+    profile = entry["settings"]["clients"][0]
+    reality = entry["streamSettings"]["realitySettings"]
+    params = {
+        "encryption": "none",
+        "flow": profile["flow"],
+        "security": "reality",
+        "sni": reality["serverNames"][0],
+        "fp": "chrome",
+        "pbk": public,
+        "sid": reality["shortIds"][0],
+        "type": "tcp",
+        "headerType": "none",
+    }
+    link = f"vless://{profile['id']}@{target}:{port}?{urlencode(params)}#reality-managed"
+    print("\n客户端连接信息")
+    for label, value in (
+        ("服务器地址 (Address)", target),
+        ("客户端端口 (Port)", port),
+        ("用户 ID (UUID)", profile["id"]),
+        ("流控 (Flow)", params["flow"]),
+        ("传输协议 (Network)", params["type"]),
+        ("安全类型 (Security)", params["security"]),
+        ("TLS 目标 (Target)", reality["target"]),
+        ("SNI (ServerName)", params["sni"]),
+        ("指纹 (Fingerprint)", params["fp"]),
+        ("公钥 (PublicKey)", public),
+        ("Short ID", params["sid"]),
+    ):
+        print(f"  {label}  {value}")
+    print(f"\nVLESS 导入链接（包含访问凭据）\n{link}", flush=True)
+
+    qrencode = shutil.which("qrencode")
+    if qrencode:
+        try:
+            subprocess.run(
+                [qrencode, "-t", "ANSIUTF8"], input=link, text=True,
+                stderr=subprocess.DEVNULL, timeout=5, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
 def client():
-    target = choice("客户端连接的服务器域名或 IPv4（NLB 场景填入口）")
+    target = choice("客户端连接的服务器域名或 IPv4（NLB 场景填入口）", detect_public_ipv4())
     if not HOST_RE.fullmatch(target.lower()):
         raise ValueError("请输入域名或 IPv4")
     p = BASE / "client-public.key"
-    if not owned(p) or not KEY_RE.fullmatch(p.read_text().strip()):
+    if not owned(p):
+        raise RuntimeError("找不到有效的公钥")
+    public = p.read_text().strip()
+    if not KEY_RE.fullmatch(public):
         raise RuntimeError("找不到有效的公钥")
     i = inbound(load_cfg())
-    s = i["streamSettings"]["realitySettings"]
-    q = urlencode(dict(encryption="none",flow="xtls-rprx-vision",security="reality",
-                     sni=s["serverNames"][0],fp="chrome",pbk=p.read_text().strip(),sid=s["shortIds"][0],type="tcp"))
     ext = choice("客户端连接端口（可与本机端口不同）", str(i["port"]))
     if not PORT_RE.fullmatch(ext) or not 1 <= int(ext) <= 65535:
         raise ValueError("入口端口须在 1–65535")
     if choice("分享链接包含访问凭据；输入 SHOW 显示") == "SHOW":
-        print(f"vless://{i['settings']['clients'][0]['id']}@{target}:{int(ext)}?{q}#reality-managed")
+        show_client(i, public, target, int(ext))
 
 
 def status():

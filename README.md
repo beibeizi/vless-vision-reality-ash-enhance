@@ -10,7 +10,7 @@ curl -fsSL https://raw.githubusercontent.com/beibeizi/vless-vision-reality-ash-e
 
 选 `1` 安装，在终端选择 Xray 来源和监听端口（默认 `8443`）。TLS 域名默认沿用原版的同网段自动筛选，再按延迟分批查询最多 10 个候选的中国大陆访问记录。有近期阻断判定的候选会跳过，近期判定未阻断的候选优先，也可在菜单里手动填写。确认端口和域名后输入 `INSTALL`。[GreatFire 数据与 API](https://zh.greatfire.org/data)
 
-安装完成后选 `5`，填写客户端连接地址和外部端口以生成连接链接。查看状态、改端口、回滚和卸载也在同一菜单中操作。
+安装成功后，脚本用探测到的公网 IPv4 和监听端口直接显示客户端参数及 `vless://` 导入链接。系统装有 `qrencode` 时还会显示二维码。已有实例可选 `5` 重新显示连接信息，NLB 或端口转发场景可以填写实际对外地址和端口。查看状态、改端口、回滚和卸载也在同一菜单中操作。
 
 运行环境需要 systemd 247+、Python 3.8+、`ss` 和 sudo 权限。自动筛选需要支持 HTTP/2 的 `curl`。安装时需要一个可信的 Xray 二进制。管理器使用专用服务 `xray-reality-managed.service`。前置要求、菜单详情和备用下载方式见[交互管理器说明](interactive/README.md)。
 
