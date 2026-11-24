@@ -42,11 +42,12 @@ curl -fsSLo reality_manager.sh -H 'Accept: application/vnd.github.raw+json' http
 
 ## GreatFire 大陆访问记录
 
-自动筛选按原版握手延迟排序，向 GreatFire 查询前 5 个候选的 HTTPS 根网址。GreatFire 的判定基于其测试窗口，管理器只采用有有效测试、记录未过期且最近一次测试在七天内的明确判定。[GreatFire 数据与 API](https://zh.greatfire.org/data)
+自动筛选按原版握手延迟排序，先向 GreatFire 查询前 5 个候选的 HTTPS 根网址。如果接口有正常响应、首批没有可优先使用的结果，再查下一批最多 5 个候选。GreatFire 的判定基于其测试窗口，管理器只采用有有效测试、记录未过期且最近一次测试在七天内的明确判定。[GreatFire 数据与 API](https://zh.greatfire.org/data)
 
 - **被阻断**的候选会跳过。查询的候选全部被判定阻断时，返回菜单。
 - **未阻断**的候选优先选用，其中握手延迟最低的排在首位。
 - 查不到、记录太旧、判定不明确或接口无法连接时，会标为**待确认**。如果没有未阻断的候选，管理器会显示延迟最低的待确认域名，再等你输入 `INSTALL`。
+- 菜单会区分无测试记录、请求超时、DNS 解析错误、HTTP 拒绝等情况。首批接口全部失败时，会提示本轮大陆访问记录未核验。
 
 GreatFire 提供的是候选网站的历史 HTTPS 测量。部署后，从实际客户端验证 VPS 入口的 REALITY 握手。
 

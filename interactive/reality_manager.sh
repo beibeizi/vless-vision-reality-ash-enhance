@@ -47,8 +47,18 @@ HOST_RE = re.compile(r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+
 BIN_RE = re.compile(r"/[A-Za-z0-9_./-]+\Z")
 KEY_RE = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 GREATFIRE_URL = "https://zh.greatfire.org/api/url/https/"
-GREATFIRE_CANDIDATES = 5
+GREATFIRE_BATCH_SIZE = 5
+GREATFIRE_CANDIDATES = 10
 GREATFIRE_MAX_AGE = timedelta(days=7)
+GREATFIRE_CURL_ERRORS = {
+    5: "代理 DNS 解析失败",
+    6: "DNS 解析失败",
+    7: "连接失败",
+    28: "请求超时",
+    35: "TLS 握手失败",
+    60: "TLS 证书校验失败",
+    63: "响应超过大小限制",
+}
 os.environ["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin:/usr/local/bin"
 os.umask(0o077)
 
@@ -121,17 +131,31 @@ def greatfire_status(domain):
         reply = cmd(
             "curl", "--disable", "--fail", "--silent", "--max-time", "5",
             "--max-filesize", "65536", "--header", "Accept: application/json",
+            "--write-out", "\n%{http_code}",
             GREATFIRE_URL + domain, check=False,
         )
-        if reply.returncode:
-            return None, "待确认（GreatFire 接口请求失败）"
-        data = json.loads(reply.stdout)
     except (OSError, ValueError, subprocess.SubprocessError):
-        return None, "待确认（GreatFire 接口请求或解析失败）"
+        return "error", "待确认（GreatFire 请求未完成）"
+
+    body, _, http_code = reply.stdout.rpartition("\n")
+    if http_code != "200" and re.fullmatch(r"[1-5][0-9]{2}", http_code):
+        return "error", f"待确认（GreatFire HTTP {http_code}）"
+    if reply.returncode:
+        message = GREATFIRE_CURL_ERRORS.get(reply.returncode, "请求失败")
+        return "error", f"待确认（GreatFire {message}，curl {reply.returncode}）"
+    if http_code != "200":
+        return "error", "待确认（GreatFire 响应缺少 HTTP 状态）"
+
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return "error", "待确认（GreatFire 响应不是有效 JSON）"
 
     expected_url = f"https://{domain}"
     if not isinstance(data, dict) or data.get("url") not in (expected_url, expected_url + "/"):
-        return None, "待确认（GreatFire 返回的网址不匹配）"
+        return "error", "待确认（GreatFire 返回的网址不匹配）"
+    if data.get("found") is False:
+        return None, "待确认（GreatFire 无测试记录）"
     count = data.get("conclusions")
     if data.get("found") is not True or type(count) is not int or count < 1:
         return None, "待确认（无有效测试记录）"
@@ -155,20 +179,29 @@ def greatfire_status(domain):
 
 
 def choose_greatfire_domain(domains):
-    print(f"正在查询前 {len(domains)} 个候选的 GreatFire 大陆访问记录…")
-    with ThreadPoolExecutor(max_workers=len(domains)) as workers:
-        results = list(workers.map(greatfire_status, domains))
+    pending = []
+    has_response = False
+    for start in range(0, len(domains), GREATFIRE_BATCH_SIZE):
+        batch = domains[start:start + GREATFIRE_BATCH_SIZE]
+        print(f"正在查询排名 {start + 1}–{start + len(batch)} 的候选（GreatFire 大陆访问记录）…")
+        with ThreadPoolExecutor(max_workers=len(batch)) as workers:
+            results = list(workers.map(greatfire_status, batch))
 
-    available, pending = [], []
-    for domain, (verdict, detail) in zip(domains, results):
-        print(f"  {domain}  {detail}")
-        if verdict == "not blocked":
-            available.append(domain)
-        elif verdict != "blocked":
-            pending.append(domain)
+        available = []
+        for domain, (verdict, detail) in zip(batch, results):
+            print(f"  {domain}  {detail}")
+            if verdict != "error":
+                has_response = True
+            if verdict == "not blocked":
+                available.append(domain)
+            elif verdict != "blocked":
+                pending.append(domain)
 
-    if available:
-        return available[0]
+        if available:
+            return available[0]
+        if not has_response:
+            print("本轮未能取得 GreatFire 接口数据，大陆访问记录未核验。")
+            break
     if pending:
         print(f"按原版延迟顺序选出待确认域名 {pending[0]}，请核对后再确认安装。")
         return pending[0]
