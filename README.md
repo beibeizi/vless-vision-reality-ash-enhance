@@ -1,9 +1,20 @@
-# vless-vision-reality-ash
+# vless-vision-reality-ash-enhance
 
 ## 交互增强版
 
-使用 [交互管理器](interactive/README.md) 自定义端口、查看状态、改端口、回滚配置和卸载专用实例。从仓库根目录在 Linux/systemd 上运行 `sudo bash interactive/reality_manager.sh`（先阅读前置要求）。它不会自动执行下方原版脚本，不会修改或卸载原有 `xray.service`。
+在 Linux 的 SSH 或本机交互终端中运行下面一条命令，即可打开管理菜单。
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/beibeizi/vless-vision-reality-ash-enhance/main/interactive/reality_manager.sh | sudo bash
+```
+
+选 `1` 安装，在终端选择 Xray 来源、监听端口（默认 `8443`）和 TLS 域名。安装完成后选 `5`，填写客户端连接地址和外部端口以生成连接链接。查看状态、改端口、回滚和卸载也在同一菜单中操作。
+
+运行环境需要 systemd 247+、Python 3.8+、`ss` 和 sudo 权限。安装时需要一个可信的 Xray 二进制。管理器使用专用服务 `xray-reality-managed.service`。前置要求、菜单详情和备用下载方式见[交互管理器说明](interactive/README.md)。
+
+---
+
+## 原版脚本
 
 **VLESS + TCP + XTLS-Vision + Reality** 同网段 / 同 ASN“邻居伪装域名”自动筛选与 Linux 一键部署脚本。
 
@@ -11,7 +22,7 @@
 
 ---
 
-## 核心功能
+### 核心功能
 
 1. **自动识别 ASN 与 BGP 号段**：查询本机公网 IPv4 所属 ASN 及 BGP 路由网段（`bgp.he.net` + `RIPEstat` 双源）。
 2. **检索同网段邻居域名**：对接 `bgp.he.net` Certs 接口获取同号段所有邻居证书域名，优先筛选简短的 `.com` / `.net` 域名。
@@ -29,21 +40,21 @@
 
 ---
 
-## 快速使用
+### 原版用法
 
-### 1. 全自动扫描最优邻居域名并一键部署（推荐）
+#### 1. 全自动扫描最优邻居域名并一键部署
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/huawuhen/vless-vision-reality-ash/main/reality_neighbor.sh -o reality_neighbor.sh && chmod +x reality_neighbor.sh && sudo bash reality_neighbor.sh
 ```
 
-### 2. 仅扫描同网段可用邻居域名与延迟排名（不安装 Xray）
+#### 2. 仅扫描同网段可用邻居域名与延迟排名（不安装 Xray）
 
 ```bash
 bash reality_neighbor.sh --scan
 ```
 
-### 3. 手动指定伪装域名或端口部署
+#### 3. 手动指定伪装域名或端口部署
 
 ```bash
 sudo bash reality_neighbor.sh --domain example.com --port 443
@@ -51,7 +62,7 @@ sudo bash reality_neighbor.sh --domain example.com --port 443
 
 ---
 
-## 命令行参数
+### 命令行参数
 
 | 参数 | 说明 | 默认值 |
 | :--- | :--- | :--- |
@@ -63,7 +74,7 @@ sudo bash reality_neighbor.sh --domain example.com --port 443
 
 ---
 
-## 常用维护命令
+### 常用维护命令
 
 - **查看节点配置与 `vless://` 导入链接**：
   ```bash

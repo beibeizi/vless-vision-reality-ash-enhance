@@ -6,11 +6,27 @@
 
 - Linux、正在运行的 systemd 247+、系统 Python 3.8+、`ss`（通常来自 iproute2）、有 sudo 权限的交互终端。不是 Windows 原生安装器。
 - 可信的 Xray-core 二进制；建议使用与 [官方 REALITY 文档](https://xtls.github.io/en/config/transports/reality.html) 匹配的近期正式版。若核心太旧不支持 `network: raw` 或 `target`，内置配置检查应阻止安装，而不是兼容性试错覆盖现有实例。
-- 原样保留这两个脚本，核对来源后再运行。请选择自己控制或已获授权的 TLS 域名，确认目标 :443 的证书与 SNI 匹配，支持 TLS 1.3、HTTP/2；本工具不探测第三方站点。未通过 REALITY 鉴权的连接可能被转发到配置目标，不要将它指向未经授权的网站。
+- 请选择自己控制或已获授权的 TLS 域名，确认目标 :443 的证书与 SNI 匹配，支持 TLS 1.3、HTTP/2；本工具不探测第三方站点。未通过 REALITY 鉴权的连接可能被转发到配置目标，不要将它指向未经授权的网站。
 - [官方 Xray 发布页](https://github.com/XTLS/Xray-core/releases)。可以复用已经装好的可信 Xray，或手动取得适合机器架构的官方包，先通过可信的官方材料验证下载包，再解包并计算二进制自身 SHA-256：`sha256sum /绝对路径/xray`，安装时选择来源 2。管理器校验的摘要是二进制本身，不是 ZIP。只有本地哈希、没有可信对照来源，不足以证明下载真实。脚本从不下载或执行网络安装脚本。
 
+## 启动
+
+在交互终端运行下面命令即可打开菜单。端口、TLS 域名等参数在菜单中填写。
+
 ```bash
-sudo bash reality_manager.sh
+curl -fsSL https://raw.githubusercontent.com/beibeizi/vless-vision-reality-ash-enhance/main/interactive/reality_manager.sh | sudo bash
+```
+
+也可以先保存脚本，再启动菜单。
+
+```bash
+curl -fsSLo reality_manager.sh https://raw.githubusercontent.com/beibeizi/vless-vision-reality-ash-enhance/main/interactive/reality_manager.sh && sudo bash reality_manager.sh
+```
+
+如果当前网络无法访问 GitHub Raw，可从 GitHub API 下载同一个文件。
+
+```bash
+curl -fsSLo reality_manager.sh -H 'Accept: application/vnd.github.raw+json' https://api.github.com/repos/beibeizi/vless-vision-reality-ash-enhance/contents/interactive/reality_manager.sh && sudo bash reality_manager.sh
 ```
 
 ## 菜单
