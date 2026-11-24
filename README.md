@@ -8,9 +8,11 @@
 curl -fsSL https://raw.githubusercontent.com/beibeizi/vless-vision-reality-ash-enhance/main/interactive/reality_manager.sh | sudo bash
 ```
 
-选 `1` 安装，在终端选择 Xray 来源、监听端口（默认 `8443`）和 TLS 域名。安装完成后选 `5`，填写客户端连接地址和外部端口以生成连接链接。查看状态、改端口、回滚和卸载也在同一菜单中操作。
+选 `1` 安装，在终端选择 Xray 来源和监听端口（默认 `8443`）。TLS 域名默认沿用原版的同网段自动筛选，选出符合 TLS 1.3、HTTP/2 200 等条件且握手延迟最低的域名，也可在菜单里手动填写。确认端口和域名后输入 `INSTALL`。
 
-运行环境需要 systemd 247+、Python 3.8+、`ss` 和 sudo 权限。安装时需要一个可信的 Xray 二进制。管理器使用专用服务 `xray-reality-managed.service`。前置要求、菜单详情和备用下载方式见[交互管理器说明](interactive/README.md)。
+安装完成后选 `5`，填写客户端连接地址和外部端口以生成连接链接。查看状态、改端口、回滚和卸载也在同一菜单中操作。
+
+运行环境需要 systemd 247+、Python 3.8+、`ss` 和 sudo 权限。自动筛选需要支持 HTTP/2 的 `curl`。安装时需要一个可信的 Xray 二进制。管理器使用专用服务 `xray-reality-managed.service`。前置要求、菜单详情和备用下载方式见[交互管理器说明](interactive/README.md)。
 
 ---
 

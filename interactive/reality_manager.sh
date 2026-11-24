@@ -11,7 +11,7 @@ run_manager() {
         fi
     fi
 
-    exec /usr/bin/python3 -I /dev/fd/3 "$@" <&"$menu_input" 3<<'PYTHON'
+    exec /usr/bin/python3 -I /dev/fd/3 "$@" <&"$menu_input" 3<<'PYTHON' 4<<'NEIGHBOR_SCANNER'
 #!/usr/bin/env python3
 """Interactive management of a dedicated Xray REALITY instance on Linux/systemd."""
 import hashlib
@@ -111,7 +111,36 @@ def busy(p):
     return bool(cmd("ss", "-H", "-ltn", f"sport = :{p}").stdout.strip())
 
 
-def domain_query():
+def automatic_domain(scanner):
+    if not shutil.which("curl") or not re.search(r"^Features:.*\bHTTP2\b", cmd("curl", "--version").stdout, re.M):
+        raise RuntimeError("自动筛选需要支持 HTTP/2 的 curl")
+
+    with tempfile.TemporaryDirectory(prefix="reality-neighbor-") as stage:
+        result = Path(stage) / "result.json"
+        try:
+            scan = subprocess.run(
+                [sys.executable, "-I", "-u", "-", "80", str(result)],
+                input=scanner, encoding="utf-8", timeout=180,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("自动筛选超时，可重新尝试或手动填写 TLS 域名") from None
+        if scan.returncode in (2, 3):
+            raise RuntimeError("未找到合格的 TLS 域名，可重新筛选或手动填写")
+        if scan.returncode:
+            raise RuntimeError("自动筛选未完成，请检查服务器的公网与 DNS 连通性")
+        domain = json.loads(result.read_text(encoding="utf-8"))["best"]["domain"]
+
+    if not HOST_RE.fullmatch(domain):
+        raise RuntimeError("自动筛选返回的 TLS 域名格式无效")
+    return domain
+
+
+def domain_query(scanner):
+    source = choice("TLS 域名来源（1 原版自动筛选，2 手动填写）", "1")
+    if source == "1":
+        return automatic_domain(scanner)
+    if source != "2":
+        raise ValueError("无效的 TLS 域名来源选项")
     domain = choice("你控制或已获授权使用的 TLS 域名（不含协议、端口）").lower()
     if not HOST_RE.fullmatch(domain):
         raise ValueError("请输入域名，例如 tls.example.org；国际域名请用 Punycode")
@@ -214,12 +243,12 @@ def stage_binary(directory):
     return str(dest)
 
 
-def add():
+def add(scanner):
     with tempfile.TemporaryDirectory(prefix="reality-install-") as stage:
-        provision(stage)
+        provision(stage, scanner)
 
 
-def provision(stage):
+def provision(stage, scanner):
     if existing_paths() or sc("show", "-p", "LoadState", "--value", NAME, check=False).stdout.strip() != "not-found":
         raise RuntimeError("专用路径或同名服务已经存在；不会覆盖或接管")
     ver = cmd("systemctl", "--version").stdout.splitlines()[0]
@@ -231,9 +260,9 @@ def provision(stage):
         raise ValueError("无效来源选项")
     exe = binary(choice("已安装、可信的 Xray 可执行文件", "/usr/local/bin/xray")) if option == "1" else stage_binary(stage)
     p = port_query()
-    target = domain_query()
     if busy(p):
         raise RuntimeError(f"TCP {p} 已被占用")
+    target = domain_query(scanner)
     print(f"将创建专用服务 {NAME}，监听 0.0.0.0:{p}，TLS 目标 {target}:443。")
     if choice("输入 INSTALL 确认") != "INSTALL":
         print("已取消"); return
@@ -413,12 +442,14 @@ def main():
         if not stat.S_ISREG(fd_info.st_mode) or fd_info.st_uid != 0 or fd_info.st_mode & 0o077:
             raise RuntimeError("锁文件不是受保护的常规文件")
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with os.fdopen(4, encoding="utf-8") as scanner_file:
+            scanner = scanner_file.read()
         while True:
             print("\n1 安装专用实例  2 查看状态  3 更改端口  4 回滚配置\n5 显示连接信息  6 卸载专用实例  0 退出")
             try:
                 n = choice("请选择", "0")
                 if n == "0": return
-                if n == "1": add()
+                if n == "1": add(scanner)
                 elif n == "2": status()
                 elif n in {"3","4","5","6"}:
                     if not managed():
@@ -439,6 +470,380 @@ if __name__ == "__main__":
         print(f"无法运行：{e}", file=sys.stderr)
         sys.exit(1)
 PYTHON
+# Generated from reality_neighbor.sh by tools/sync_neighbor_scanner.py.
+import sys
+import re
+import json
+import time
+import socket
+import ssl
+import ipaddress
+import urllib.request
+import urllib.parse
+import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+MAX_CANDIDATES = int(sys.argv[1]) if len(sys.argv) > 1 else 80
+RESULT_FILE = sys.argv[2] if len(sys.argv) > 2 else "/tmp/reality_best_domain.json"
+
+UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+# 常见 Cloudflare IPv4 网段 (双重防套 CF 检测)
+CF_NETS = [ipaddress.ip_network(cidr) for cidr in [
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+    "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+    "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22"
+]]
+
+def http_get(url, timeout=10):
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json, text/html, */*"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="ignore")
+
+def get_public_ipv4():
+    endpoints = [
+        "https://api.ipify.org",
+        "https://ipv4.icanhazip.com",
+        "https://v4.ident.me",
+        "https://ifconfig.me/ip"
+    ]
+    for url in endpoints:
+        try:
+            ip_str = http_get(url, timeout=5).strip()
+            ip_obj = ipaddress.ip_address(ip_str)
+            if isinstance(ip_obj, ipaddress.IPv4Address):
+                return ip_str
+        except Exception:
+            continue
+    raise RuntimeError("无法获取当前 Linux 主机的公网 IPv4 地址")
+
+def get_asn_and_prefixes(ip_str):
+    """
+    通过 bgp.he.net 和 RIPEstat 获取当前 IP 的所属 ASN、机构名称以及所在号段 (BGP Prefix)
+    """
+    asns = []
+    prefixes = []
+    asn_descs = {}
+
+    # 1. 从 bgp.he.net/ip/<IP> 提取 (与文章步骤完全一致)
+    try:
+        html = http_get(f"https://bgp.he.net/ip/{ip_str}", timeout=10)
+        # 匹配形如: <td><a href="/AS35916">AS35916</a></td><td class="nowrap"><a href="/net/142.171.0.0/16">142.171.0.0/16</a>...</td><td>MULTACOM CORPORATION</td>
+        row_pattern = re.compile(
+            r'href="/AS(\d+)"[^>]*>AS\d+</a>.*?href="/net/([0-9\./]+)"[^>]*>[0-9\./]+</a>.*?</td>\s*<td>([^<]+)</td>',
+            re.S
+        )
+        for m in row_pattern.finditer(html):
+            asn, pfx, desc = m.group(1), m.group(2).strip(), m.group(3).strip()
+            if asn not in asns:
+                asns.append(asn)
+            if pfx not in prefixes:
+                prefixes.append(pfx)
+            asn_descs[asn] = desc
+    except Exception as e:
+        pass
+
+    # 2. 补充从 RIPEstat BGP API 获取精确 ASN 与 Prefix (防止 bgp.he.net 偶发拦截)
+    try:
+        ripe_json = json.loads(http_get(f"https://stat.ripe.net/data/network-info/data.json?resource={ip_str}", timeout=8))
+        data = ripe_json.get("data", {})
+        for a in data.get("asns", []):
+            if str(a) not in asns:
+                asns.append(str(a))
+        pfx = data.get("prefix")
+        if pfx and pfx not in prefixes:
+            prefixes.append(pfx)
+    except Exception:
+        pass
+
+    # 构造同 /24 网段
+    ip_obj = ipaddress.ip_address(ip_str)
+    net24 = str(ipaddress.ip_network(f"{ip_str}/24", strict=False))
+    if net24 not in prefixes:
+        prefixes.insert(0, net24)
+    else:
+        # 确保更精确的网段排在前面优先扫，同时保留大网段补充
+        prefixes.sort(key=lambda x: ipaddress.ip_network(x, strict=False).prefixlen, reverse=True)
+
+    return asns, asn_descs, prefixes
+
+def fetch_neighbor_domains_from_bgphe(prefixes):
+    """
+    调用 bgp.he.net 的 Certs 接口 (/certs/api/ip-search?ip=<prefix>) 获取同网段邻居证书中的所有域名
+    同时补充 /net/<prefix> 页面中的反向 DNS (A/PTR) 记录
+    """
+    domain_to_bgp_ips = {}
+
+    for pfx in prefixes:
+        # 避免扫超过 /16 的超大段导致超时；如果前缀小于 /18，将其收敛到包含本机的 /20 或 /18
+        try:
+            net_obj = ipaddress.ip_network(pfx, strict=False)
+            if net_obj.prefixlen < 18:
+                continue
+        except Exception:
+            continue
+
+        try:
+            api_url = f"https://bgp.he.net/certs/api/ip-search?ip={urllib.parse.quote(pfx)}"
+            raw = http_get(api_url, timeout=12)
+            data = json.loads(raw)
+            entries = data.get("entries", [])
+            for entry in entries:
+                entry_ip = entry.get("ip", "")
+                for h in entry.get("hostnames", []):
+                    h = h.strip().lower().lstrip("*.")
+                    if not h or "." not in h:
+                        continue
+                    domain_to_bgp_ips.setdefault(h, set()).add(entry_ip)
+        except Exception:
+            pass
+
+        # 如果从小段 (/24) 拿到的候选域名已经超过 150 个，就不必继续拉取更大的段；否则继续拉取上级 BGP 段
+        if len(domain_to_bgp_ips) >= 150:
+            break
+
+    return domain_to_bgp_ips
+
+def is_good_domain_format(domain):
+    """
+    过滤掉不合格的域名格式，并按文章要求给短的、靓的 com/net 域名打高分
+    """
+    if not re.match(r'^[a-z0-9][a-z0-9\.\-]{1,61}[a-z0-9]\.[a-z]{2,}$', domain):
+        return False
+    # 排除纯数字或含 IP 地址格式的自动域名 / nip.io / sslip.io / traefik / 面板或邮件逆向域名
+    bad_keywords = [
+        "nip.io", "sslip.io", "xip.io", "local", "localhost", "arpa",
+        "cpanel", "webmail", "whm.", "autodiscover", "autoconfig",
+        "mail.", "smtp.", "pop.", "imap.", "mx.", "ns1.", "ns2."
+    ]
+    for kw in bad_keywords:
+        if kw in domain:
+            return False
+    # 排除包含连续 3 段以上 IP 数字的生成式主机名
+    if re.search(r'\d{1,3}[\-\.]\d{1,3}[\-\.]\d{1,3}', domain):
+        return False
+    return True
+
+def domain_priority_key(domain):
+    """
+    文章要求：首选短的、靓的 com、net 域名
+    返回值越小优先级越高
+    """
+    tld_rank = 2
+    if domain.endswith(".com"):
+        tld_rank = 0
+    elif domain.endswith(".net"):
+        tld_rank = 1
+    elif domain.endswith(".org"):
+        tld_rank = 2
+    else:
+        tld_rank = 3
+    parts = domain.split(".")
+    return (tld_rank, len(parts), len(domain))
+
+def is_cloudflare_ip(ip_str):
+    try:
+        ip_obj = ipaddress.ip_address(ip_str)
+        return any(ip_obj in net for net in CF_NETS)
+    except Exception:
+        return False
+
+def check_candidate_domain(domain, allowed_networks, my_ip):
+    """
+    严格按文章第 二 节执行校验：
+    1. DNS 解析校验 (相当于 ping 目标域名)：
+       - 解析出的 IPv4 不能是 Cloudflare CDN IP
+       - 解析出的 IPv4 必须落在我们从 bgp.he.net 查到的同机房 BGP 网段内
+    2. 协议与状态校验 (执行文章同款 curl 命令 + Python OpenSSL 底层握手校验)：
+       curl -I -v --tlsv1.3 --http2 https://目标域名
+       - 必须支持 TLSv1.3 (SSL connection using TLSv1.3)
+       - ALPN 必须协商为 h2 (ALPN: server accepted h2 / using HTTP/2)
+       - 状态码必须是 HTTP/2 200 (直接返回网页内容，非 301/302 跳转)
+       - 证书必须有效 (未过期且主机名匹配)
+    3. 测量真实 TCP + TLS 1.3 握手延迟 (ms)
+    """
+    # Step 1: DNS 解析
+    try:
+        infos = socket.getaddrinfo(domain, 443, socket.AF_INET, socket.SOCK_STREAM)
+        resolved_ips = list({info[4][0] for info in infos})
+    except Exception:
+        return None
+
+    if not resolved_ips:
+        return None
+
+    # 取第一个 IPv4 进行网段归属与非 CF 校验
+    target_ip = resolved_ips[0]
+    if target_ip == my_ip:
+        return None
+    if is_cloudflare_ip(target_ip):
+        return None
+
+    try:
+        ip_obj = ipaddress.ip_address(target_ip)
+        in_same_net = any(ip_obj in net for net in allowed_networks)
+        if not in_same_net:
+            return None
+    except Exception:
+        return None
+
+    # Step 2a: 使用 Python ssl 模块直接进行底层 TLSv1.3 + ALPN(h2) + 证书有效性校验与毫秒级握手测速
+    try:
+        ctx = ssl.create_default_context()
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_3
+        ctx.set_alpn_protocols(["h2", "http/1.1"])
+
+        t_start = time.monotonic()
+        with socket.create_connection((target_ip, 443), timeout=3.5) as raw_sock:
+            with ctx.wrap_socket(raw_sock, server_hostname=domain) as ssl_sock:
+                handshake_ms = (time.monotonic() - t_start) * 1000.0
+                tls_ver = ssl_sock.version()
+                alpn_proto = ssl_sock.selected_alpn_protocol()
+                cipher_info = ssl_sock.cipher()
+                cipher_name = cipher_info[0] if cipher_info else "TLS_AES_256_GCM_SHA384"
+
+        if tls_ver != "TLSv1.3" or alpn_proto != "h2":
+            return None
+    except Exception:
+        return None
+
+    # Step 2b: 调用文章同款 curl 命令验证 HTTP/2 状态码必须是 200 (非 301/302 跳转)
+    import os
+    env = os.environ.copy()
+    # 兼容 macOS SecureTransport
+    if sys.platform == "darwin":
+        env["CURL_SSL_BACKEND"] = "libressl"
+
+    cmd = [
+        "curl", "-I", "-v", "--tlsv1.3", "--http2",
+        "--connect-timeout", "4", "--max-time", "6",
+        "-A", UA,
+        f"https://{domain}"
+    ]
+    try:
+        t0 = time.monotonic()
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=7, env=env)
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
+        output = proc.stdout or ""
+    except Exception:
+        return None
+
+    if proc.returncode != 0:
+        return None
+
+    # 校验状态码必须是 HTTP/2 200 (非 301/302 跳转)
+    if not re.search(r"<\s*HTTP/2\s+200\b", output, re.I):
+        return None
+
+    # 二次确认响应头中不含 Server: cloudflare
+    if re.search(r"<\s*server:\s*cloudflare", output, re.I):
+        return None
+
+    tls_line = f"SSL connection using {tls_ver} / {cipher_name}"
+    alpn_line = "ALPN: server accepted h2"
+
+    return {
+        "domain": domain,
+        "ip": target_ip,
+        "latency_ms": round(handshake_ms, 2),
+        "total_ms": round(elapsed_ms, 2),
+        "tls_info": tls_line,
+        "alpn_info": alpn_line,
+        "http_status": "HTTP/2 200",
+        "is_com_net": domain.endswith(".com") or domain.endswith(".net")
+    }
+
+def main():
+    print("\033[0;36m[1/4] 正在查询当前 Linux 主机的公网 IP 与所属 ASN / BGP 号段...\033[0m")
+    my_ip = get_public_ipv4()
+    asns, asn_descs, prefixes = get_asn_and_prefixes(my_ip)
+
+    asn_str = ", ".join([f"AS{a} ({asn_descs.get(a, 'Unknown')})" for a in asns]) if asns else "Unknown ASN"
+    print(f"  ├─ 本机公网 IP  : \033[1;32m{my_ip}\033[0m")
+    print(f"  ├─ 所属 ASN     : \033[1;32m{asn_str}\033[0m")
+    print(f"  └─ 关联 BGP 号段: \033[1;33m{', '.join(prefixes)}\033[0m")
+
+    print("\n\033[0;36m[2/4] 正在从 bgp.he.net (Certs 证书透明度数据库) 检索同网段邻居域名...\033[0m")
+    domain_map = fetch_neighbor_domains_from_bgphe(prefixes)
+    all_raw_domains = list(domain_map.keys())
+    print(f"  ├─ 共检索到原始邻居证书域名: \033[1m{len(all_raw_domains)}\033[0m 个")
+
+    # 过滤掉不合格格式并按 (.com/.net 优先、短域名优先) 排序
+    filtered_domains = [d for d in all_raw_domains if is_good_domain_format(d)]
+    filtered_domains.sort(key=domain_priority_key)
+    candidates = filtered_domains[:MAX_CANDIDATES]
+    print(f"  └─ 格式初筛后保留优质候选域名: \033[1m{len(candidates)}\033[0m 个 (优先短 com/net 域名)")
+
+    if not candidates:
+        print("\033[0;31m[!] 当前网段在 bgp.he.net Certs 中未找到合适候选域名。\033[0m")
+        sys.exit(2)
+
+    # 允许的同机房网段列表 (用于验证 ping/DNS 解析出的 IP 确实在同网段，未套 CF CDN)
+    allowed_networks = []
+    for p in prefixes:
+        try:
+            allowed_networks.append(ipaddress.ip_network(p, strict=False))
+        except Exception:
+            pass
+
+    print(f"\n\033[0;36m[3/4] 正在并发校验候选域名 (TLSv1.3 + ALPN h2 + HTTP/2 200 + 同网段非CDN + 握手延迟测速)...\033[0m")
+    valid_results = []
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        future_to_dom = {
+            executor.submit(check_candidate_domain, dom, allowed_networks, my_ip): dom
+            for dom in candidates
+        }
+        done_cnt = 0
+        total_cnt = len(candidates)
+        for future in as_completed(future_to_dom):
+            done_cnt += 1
+            res = future.result()
+            if res:
+                valid_results.append(res)
+                print(
+                    f"  \033[0;32m✓ [合格]\033[0m {res['domain']:<32} "
+                    f"IP: {res['ip']:<15} TLS握手延迟: \033[1;32m{res['latency_ms']} ms\033[0m "
+                    f"({res['http_status']}, h2, TLSv1.3)"
+                )
+
+    if not valid_results:
+        print("\033[0;31m[!] 未能在当前网段筛选出同时满足 TLSv1.3 + H2 + HTTP 200 + 未套 CDN 的域名。\033[0m")
+        sys.exit(3)
+
+    # 按延迟从低到高排序 (满足用户“另外还要延迟最低的那个”要求)
+    valid_results.sort(key=lambda x: (x["latency_ms"], 0 if x["is_com_net"] else 1, len(x["domain"])))
+    best = valid_results[0]
+
+    print(f"\n\033[0;36m[4/4] 筛选完成！共找到 {len(valid_results)} 个完全符合规范的邻居域名 (按延迟从低到高 Top 10)：\033[0m")
+    print("  " + "-" * 86)
+    print(f"  {'排名':<4} {'域名 (SNI / Target)':<32} {'解析 IP (同网段)':<16} {'TLS握手延迟':<12} {'协议验证'}")
+    print("  " + "-" * 86)
+    for idx, item in enumerate(valid_results[:10], 1):
+        star = "★ 最优" if idx == 1 else f"#{idx}"
+        color = "\033[1;32m" if idx == 1 else ""
+        endc = "\033[0m" if idx == 1 else ""
+        print(
+            f"  {color}{star:<6} {item['domain']:<32} {item['ip']:<16} "
+            f"{str(item['latency_ms']) + ' ms':<12} TLSv1.3 | ALPN: h2 | HTTP/2 200{endc}"
+        )
+    print("  " + "-" * 86)
+
+    output_payload = {
+        "my_ip": my_ip,
+        "asns": asns,
+        "asn_descs": asn_descs,
+        "prefixes": prefixes,
+        "best": best,
+        "all_valid": valid_results
+    }
+    with open(RESULT_FILE, "w", encoding="utf-8") as f:
+        json.dump(output_payload, f, ensure_ascii=False, indent=2)
+
+if __name__ == "__main__":
+    main()
+NEIGHBOR_SCANNER
 }
 
 run_manager "$@"
