@@ -1,5 +1,10 @@
 # vless-vision-reality-ash
 
+## 交互增强版
+
+使用 [交互管理器](interactive/README.md) 自定义端口、查看状态、改端口、回滚配置和卸载专用实例。从仓库根目录在 Linux/systemd 上运行 `sudo bash interactive/reality_manager.sh`（先阅读前置要求）。它不会自动执行下方原版脚本，不会修改或卸载原有 `xray.service`。
+
+
 **VLESS + TCP + XTLS-Vision + Reality** 同网段 / 同 ASN“邻居伪装域名”自动筛选与 Linux 一键部署脚本。
 
 解决默认使用大厂域名（如 `www.apple.com`）与小机房 VPS IP 之间存在的 **“路由与 ASN 悖论”** 破绽，通过自动检索本机所在 BGP 网段的证书透明度（CT）记录，筛选出**同网段、未套 CDN、支持 TLSv1.3 + HTTP/2 (ALPN h2)、直接返回 200 且握手延迟最低**的邻居域名并完成一键部署。
