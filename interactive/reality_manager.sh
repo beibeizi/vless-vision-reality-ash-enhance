@@ -14,6 +14,8 @@ run_manager() {
     exec /usr/bin/python3 -I /dev/fd/3 "$@" <&"$menu_input" 3<<'PYTHON' 4<<'NEIGHBOR_SCANNER'
 #!/usr/bin/env python3
 """Interactive management of a dedicated Xray REALITY instance on Linux/systemd."""
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 import hashlib
 import shutil
 import fcntl
@@ -44,6 +46,9 @@ PORT_RE = re.compile(r"[0-9]{1,5}\Z")
 HOST_RE = re.compile(r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 BIN_RE = re.compile(r"/[A-Za-z0-9_./-]+\Z")
 KEY_RE = re.compile(r"[A-Za-z0-9_-]{43}\Z")
+GREATFIRE_URL = "https://zh.greatfire.org/api/url/https/"
+GREATFIRE_CANDIDATES = 5
+GREATFIRE_MAX_AGE = timedelta(days=7)
 os.environ["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin:/usr/local/bin"
 os.umask(0o077)
 
@@ -111,6 +116,65 @@ def busy(p):
     return bool(cmd("ss", "-H", "-ltn", f"sport = :{p}").stdout.strip())
 
 
+def greatfire_status(domain):
+    try:
+        reply = cmd(
+            "curl", "--disable", "--fail", "--silent", "--max-time", "5",
+            "--max-filesize", "65536", "--header", "Accept: application/json",
+            GREATFIRE_URL + domain, check=False,
+        )
+        if reply.returncode:
+            return None, "待确认（GreatFire 接口请求失败）"
+        data = json.loads(reply.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None, "待确认（GreatFire 接口请求或解析失败）"
+
+    expected_url = f"https://{domain}"
+    if not isinstance(data, dict) or data.get("url") not in (expected_url, expected_url + "/"):
+        return None, "待确认（GreatFire 返回的网址不匹配）"
+    count = data.get("conclusions")
+    if data.get("found") is not True or type(count) is not int or count < 1:
+        return None, "待确认（无有效测试记录）"
+
+    last_tested = data.get("last_tested")
+    if data.get("stale") is not False or not isinstance(last_tested, str):
+        return None, "待确认（测试记录过期或缺少时间）"
+    try:
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(last_tested.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None, "待确认（测试时间无效）"
+    if not timedelta(0) <= age <= GREATFIRE_MAX_AGE:
+        return None, "待确认（最近测试不在七天内）"
+
+    verdict = data.get("verdict")
+    if verdict == "blocked":
+        return verdict, "跳过（GreatFire 判定被阻断）"
+    if verdict == "not blocked":
+        return verdict, "优先（GreatFire 判定未阻断）"
+    return None, "待确认（GreatFire 无明确可访问结论）"
+
+
+def choose_greatfire_domain(domains):
+    print(f"正在查询前 {len(domains)} 个候选的 GreatFire 大陆访问记录…")
+    with ThreadPoolExecutor(max_workers=len(domains)) as workers:
+        results = list(workers.map(greatfire_status, domains))
+
+    available, pending = [], []
+    for domain, (verdict, detail) in zip(domains, results):
+        print(f"  {domain}  {detail}")
+        if verdict == "not blocked":
+            available.append(domain)
+        elif verdict != "blocked":
+            pending.append(domain)
+
+    if available:
+        return available[0]
+    if pending:
+        print(f"按原版延迟顺序选出待确认域名 {pending[0]}，请核对后再确认安装。")
+        return pending[0]
+    raise RuntimeError("本次查询的候选均被 GreatFire 判定阻断，可重新筛选或手动填写")
+
+
 def automatic_domain(scanner):
     if not shutil.which("curl") or not re.search(r"^Features:.*\bHTTP2\b", cmd("curl", "--version").stdout, re.M):
         raise RuntimeError("自动筛选需要支持 HTTP/2 的 curl")
@@ -128,15 +192,16 @@ def automatic_domain(scanner):
             raise RuntimeError("未找到合格的 TLS 域名，可重新筛选或手动填写")
         if scan.returncode:
             raise RuntimeError("自动筛选未完成，请检查服务器的公网与 DNS 连通性")
-        domain = json.loads(result.read_text(encoding="utf-8"))["best"]["domain"]
+        ranked = json.loads(result.read_text(encoding="utf-8"))["all_valid"]
 
-    if not HOST_RE.fullmatch(domain):
-        raise RuntimeError("自动筛选返回的 TLS 域名格式无效")
-    return domain
+    domains = [item["domain"] for item in ranked if HOST_RE.fullmatch(item["domain"])]
+    if not domains:
+        raise RuntimeError("自动筛选未返回格式有效的 TLS 域名")
+    return choose_greatfire_domain(domains[:GREATFIRE_CANDIDATES])
 
 
 def domain_query(scanner):
-    source = choice("TLS 域名来源（1 原版自动筛选，2 手动填写）", "1")
+    source = choice("TLS 域名来源（1 自动筛选并查询 GreatFire，2 手动填写）", "1")
     if source == "1":
         return automatic_domain(scanner)
     if source != "2":

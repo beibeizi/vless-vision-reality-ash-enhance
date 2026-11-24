@@ -8,7 +8,7 @@
 curl -fsSL https://raw.githubusercontent.com/beibeizi/vless-vision-reality-ash-enhance/main/interactive/reality_manager.sh | sudo bash
 ```
 
-选 `1` 安装，在终端选择 Xray 来源和监听端口（默认 `8443`）。TLS 域名默认沿用原版的同网段自动筛选，选出符合 TLS 1.3、HTTP/2 200 等条件且握手延迟最低的域名，也可在菜单里手动填写。确认端口和域名后输入 `INSTALL`。
+选 `1` 安装，在终端选择 Xray 来源和监听端口（默认 `8443`）。TLS 域名默认沿用原版的同网段自动筛选，再查询延迟最低的最多 5 个候选的中国大陆访问记录。有近期阻断记录的候选会跳过，近期判定未阻断的候选优先，也可在菜单里手动填写。确认端口和域名后输入 `INSTALL`。[GreatFire 数据与 API](https://zh.greatfire.org/data)
 
 安装完成后选 `5`，填写客户端连接地址和外部端口以生成连接链接。查看状态、改端口、回滚和卸载也在同一菜单中操作。
 
